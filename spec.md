@@ -1,0 +1,92 @@
+# Специфікація проєкту WpfTest
+
+## Призначення
+
+Настільний застосунок для створення тестів (вікторин) та їх проходження. Користувач проходить тест, вказавши ПІБ, а результат (кількість правильних і неправильних відповідей, час початку і завершення) зберігається в базі даних.
+
+Поточний стан: модель даних, ініціалізація БД і завантаження початкових тестів з JSON готові. `BeginWindow` (чорна тема) запитує прізвище, ім'я, по батькові, показує список тестів і кнопку «Почати тест». `TestWindow` отримує вибраний тест і учасника, проводить по питаннях (один правильний варіант → `RadioButton`, кілька → `CheckBox`) і після завершення зберігає результат (`TestResultEntity` + вибрані відповіді `TestResultAnswerEntity`) через `Services/TestResultService`, показує підсумок у `MessageBox` і повертає на `BeginWindow`. Якщо в тесті задано `TimeLimitMinutes`, показується таймер; після вичерпання часу тест завершується автоматично (без відповіді = неправильно).
+
+## Технології та залежності
+
+| Компонент | Версія / значення |
+|---|---|
+| Платформа | .NET 9 (`net9.0-windows`) |
+| UI | WPF (`UseWPF`), тип виводу `WinExe` |
+| ORM | Entity Framework Core 9 |
+| База даних | SQLite (`Microsoft.EntityFrameworkCore.Sqlite` 9.0.22) |
+| JSON | `Newtonsoft.Json` 13.0.4 (читання `SeedData/users.json`) |
+| Файл рішення | `WpfTest.slnx` (новий XML-формат рішень) |
+| Мовні опції | `Nullable` enabled, `ImplicitUsings` enabled |
+
+Окрім `Microsoft.EntityFrameworkCore.Sqlite` і `Newtonsoft.Json`, NuGet-пакетів немає: немає DI-контейнера, MVVM-фреймворка, логування чи тестових бібліотек.
+
+## Структура проєкту
+
+```
+WpfTest/
+├── WpfTest.slnx              # рішення
+├── CLAUDE.md, spec.md, README.md
+└── WpfTest/                  # єдиний проєкт
+    ├── WpfTest.csproj
+    ├── App.xaml / App.xaml.cs        # точка входу, ініціалізація БД і seed
+    ├── App.xaml / App.xaml.cs        # точка входу, ініціалізація БД і seed, спільні стилі чорної теми
+    ├── BeginWindow.xaml / .xaml.cs   # стартове вікно: ПІБ, вибір тесту, старт
+    ├── TestWindow.xaml / .xaml.cs    # проходження тесту (питання по черзі, підсумок)
+    ├── Services/
+    │   └── TestService.cs            # читання тестів з БД (приймає MyDataContext)
+    ├── MyDataContext.cs              # EF Core DbContext
+    ├── Entities/                     # сутності БД
+    │   ├── TestEntity.cs
+    │   ├── QuestionEntity.cs
+    │   ├── AnswerEntity.cs
+    │   ├── TestResultEntity.cs
+    │   └── TestResultAnswerEntity.cs
+    ├── Models/
+    │   └── TestSeedModel.cs          # DTO для JSON (TestSeedModel, QuestionSeedModel, AnswerSeedModel)
+    └── SeedData/
+        └── users.json                # початкові тести (копіюється в output)
+```
+
+## Модель даних
+
+```
+TestEntity 1 ── * QuestionEntity 1 ── * AnswerEntity
+    │
+    1
+    │
+    * TestResultEntity 1 ── * TestResultAnswerEntity (SelectedAnswer)
+```
+
+| Сутність | Таблиця | Основні поля | Обмеження |
+|---|---|---|---|
+| `TestEntity` | `Tests` | `Title`, `Description`, `CreatedAt`, `TimeLimitMinutes` | `Title` ≤ 200, `Description` ≤ 1000, ліміт часу 1–60 хв (необов'язковий) |
+| `QuestionEntity` | `Questions` (назва з `DbSet`) | `Text`, `TestId` | `Text` ≤ 1000 |
+| `AnswerEntity` | `Answers` | `Text`, `IsCorrect`, `QuestionId` | `Text` ≤ 500 |
+| `TestResultEntity` | `TestResultEntity` | `TestId`, `LastName`, `FirstName`, `MiddleName`, `CorrectAnswersCount`, `WrongAnswersCount`, `StartedAt`, `FinisheddAt` | імена ≤ 100, `MiddleName` необов'язкове |
+| `TestResultAnswerEntity` | `tblTestResultAnswers` | `TestResultId`, `SelectedAnswerId`, `IsCorrect` | зареєстрована як `DbSet`, одна строка на кожен вибраний варіант |
+
+Питання може мати кілька правильних відповідей: правильність задається прапорцем `AnswerEntity.IsCorrect`, а не полем у питанні.
+
+Початкові дані з JSON містять поле `points` у питаннях, але `QuestionEntity` його не має, тож значення ігнорується.
+
+## Основні архітектурні рішення
+
+1. **Code First + data annotations.** Схема БД описується атрибутами (`[Key]`, `[Required]`, `[StringLength]`, `[ForeignKey]`, `[Table]`) прямо в сутностях. Fluent API (`OnModelCreating`) не використовується.
+2. **`EnsureCreated` замість міграцій.** У `App.OnStartup` викликається `Database.EnsureCreated()`, тому таблиці створюються при першому запуску. Наслідок: зміни в сутностях не застосовуються до вже існуючого `DotNetTest.db`, і файл треба видалити (або перейти на міграції).
+3. **Початкові дані (seed) з JSON.** Якщо таблиця `Tests` порожня, `App.OnStartup` читає `SeedData/users.json` (шлях відносно робочої директорії), десеріалізує його в `TestSeedModel` через `Newtonsoft.Json` і додає тести з питаннями та відповідями. Файл копіюється в output (`CopyToOutputDirectory = Always`).
+4. **Підключення до БД захардкоджене.** `OnConfiguring` використовує `Data Source=DotNetTest.db` (шлях відносно робочої директорії, зазвичай `bin/Debug/net9.0-windows/`). Немає `appsettings` і DI: контекст створюється через `new MyDataContext()`.
+5. **Ручний запуск вікна.** В `App.xaml` немає `StartupUri`, тому `BeginWindow` створюється й показується в `OnStartup` після ініціалізації БД.
+6. **Code-behind замість MVVM.** На даний момент логіка розміщується у code-behind файлах.
+
+## Відомі проблеми
+
+- `TestEntity` не має колекції результатів.
+- Після змін схеми (`TestResultAnswerEntity`, колекція `Answers`) потрібно видалити старий `DotNetTest.db` у `bin/.../net9.0-windows/`.
+- Друкарська помилка в назві властивості `FinisheddAt` (стане назвою колонки в БД).
+- Значення за замовчуванням `CreatedAt` / `FinisheddAt` у сутностях беруть локальний час (`DateTime.Now`), але позначають його як UTC (`DateTimeKind.Utc`). Правильніше використовувати `DateTime.UtcNow`. Seed уже використовує `DateTime.UtcNow` для `CreatedAt`.
+- Непослідовні назви таблиць (`Tests`, `TestResultEntity`, `tblTestResultAnswers`).
+- Для колекцій навігації `QuestionEntity`/`TestEntity` задано `= new List<...>()`, але навігації `Test`, `Question`, `TestResult`, `SelectedAnswer` мають `= null!`. Без `Include` звернення до них дасть `NullReferenceException`.
+- Якщо `SeedData/users.json` не знайдено, показується `MessageBox` і `OnStartup` виходить раніше, без створення `BeginWindow`, тож застосунок завершується без вікна.
+- `TestSeedModel.cs` у коментарі згадує `SeedData/tests.json`, але файл називається `users.json` (назва не відповідає вмісту: це тести, а не користувачі).
+- `MyDataContext` не звільняється (`using`) в `App.OnStartup`.
+- Тести без питань не можна запустити (перевірка в `BeginWindow` і `TestWindow`).
